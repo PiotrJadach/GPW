@@ -1,1 +1,45 @@
+import oracledb
+import os
 
+# --- KONFIGURACJA ---
+# Dane znajdziesz w pliku tnsnames.ora wewnątrz rozpakowanego portfela
+DB_USER = ""
+DB_PASSWORD = ""
+DB_DSN = ""
+WALLET_PATH = r""
+WALLET_PASSWORD = ""
+
+def test_oracle_connection():
+    connection = None
+    try:
+        print("Inicjalizacja połączenia...")
+        # Wskazujemy ścieżkę do portfela i hasło do niego
+        connection = oracledb.connect(
+            user=DB_USER,
+            password=DB_PASSWORD,
+            dsn=DB_DSN,
+            config_dir=WALLET_PATH,
+            wallet_location=WALLET_PATH,
+            wallet_password=WALLET_PASSWORD
+        )
+
+        print("✅ Sukces! Połączono z Oracle Cloud.")
+
+        # Testowe zapytanie
+        cursor = connection.cursor()
+        cursor.execute("SELECT 'Wersja bazy: ' || version FROM v$instance")
+        result = cursor.fetchone()
+        
+        print(f"📊 Wynik testu: {result[0]}")
+
+    except Exception as e:
+        print(f"❌ Błąd podczas łączenia: {e}")
+    
+    finally:
+        # Zamknięcie połączenia
+        if connection:
+            connection.close()
+            print("Połączenie zamknięte.")
+
+if __name__ == "__main__":
+    test_oracle_connection()
