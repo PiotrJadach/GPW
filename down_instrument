@@ -1,0 +1,109 @@
+import pandas as pd
+import requests
+import oracledb
+import os
+import io
+import time
+from datetime import date, timedelta
+
+# --- KONFIGURACJA ---
+
+# Ścieżka, gdzie będą zapisywane pliki
+DOWNLOAD_DIR = r""
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# URL do pobierania pliku Excel
+BASE_URL = "https://www.gpw.pl/archiwum-notowan"
+PARAMS_TEMPLATE = "fetch=1&type=10&instrument=&date={date_str}&format=xls"
+
+def get_connection():
+    try:
+        return oracledb.connect(
+            user=DB_USER, password=DB_PASSWORD, dsn=DB_DSN,
+            config_dir=WALLET_PATH, wallet_location=WALLET_PATH, wallet_password=WALLET_PASSWORD
+        )
+    except Exception as e:
+        print(f"Błąd połączenia z bazą: {e}")
+        return None
+
+def download_and_process(connection, target_date):
+    date_str = target_date.strftime("%d-%m-%Y")
+    file_path = os.path.join(DOWNLOAD_DIR, f"notowania_{date_str}.xls")
+    url = f"{BASE_URL}?{PARAMS_TEMPLATE.format(date_str=date_str)}"
+    
+    try:
+        # 1. POBIERANIE PLIKU
+        response = requests.get(url, timeout=30)
+        if response.status_code != 200 or len(response.content) < 5000:
+            return
+
+        with open(file_path, 'wb') as f:
+            f.write(response.content)
+
+        # 2. CZYTANIE PLIKU Z DYSKU
+        try:
+            df = pd.read_excel(file_path)
+        except Exception:
+            # Jeśli to "fałszywy" Excel (HTML), próbujemy read_html
+            df = pd.read_html(file_path)[0]
+
+        # Standaryzacja nazw kolumn
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # 3. WERYFIKACJA I PRZYGOTOWANIE DANYCH
+        required = ['ISIN', 'Nazwa', 'Waluta']
+        if not all(col in df.columns for col in required):
+            print(f"[{date_str}] Plik nie zawiera wymaganych kolumn. Pomijam.")
+            return
+
+        data_to_insert = df[required].dropna(subset=['ISIN']).drop_duplicates(subset=['ISIN'])
+        
+        rows = []
+        for _, r in data_to_insert.iterrows():
+            isin = str(r['ISIN']).strip()
+            if isin and isin.lower() != 'nan':
+                rows.append({
+                    "isin": isin,
+                    "nazwa": str(r['Nazwa'])[:255],
+                    "waluta": str(r['Waluta'])[:10]
+                })
+
+        # 4. WPIS DO BAZY
+        if rows:
+            cursor = connection.cursor()
+            sql = """
+            MERGE INTO gpw_instrumenty t
+            USING (SELECT :isin as isin, :nazwa as nazwa, :waluta as waluta, 'GPW' as gielda FROM dual) s
+            ON (t.isin = s.isin)
+            WHEN NOT MATCHED THEN
+                INSERT (isin, nazwa, waluta, Gielda)
+                VALUES (s.isin, s.nazwa, s.waluta, s.gielda)
+            """
+            cursor.executemany(sql, rows)
+            added = cursor.rowcount
+            connection.commit()
+            cursor.close()
+            print(f"[{date_str}] Pobrano i zapisano. Nowych instrumentów: {added}")
+
+    except Exception as e:
+        print(f"[{date_str}] Błąd przetwarzania: {e}")
+
+def main():
+    conn = get_connection()
+    if not conn: return
+    
+    start_date = date(2010, 1, 1)
+    end_date = date.today()
+    
+    current = start_date
+    while current <= end_date:
+        if current.weekday() < 5:
+            download_and_process(conn, current)
+            time.sleep(0.5)
+        current += timedelta(days=1)
+    
+    conn.close()
+    print("Zakończono pracę.")
+
+if __name__ == "__main__":
+    main()
